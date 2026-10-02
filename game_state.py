@@ -13,31 +13,78 @@ class GamePhase(str, Enum):
     ENDED = "ended"
 
 
+class PlayerStatus(str, Enum):
+    ALIVE = "alive"
+    DEAD = "dead"
+    LEFT = "left"
+
+
 @dataclass
 class PlayerState:
     user_id: int
+    name: str
     username: str | None = None
-    first_name: str = ""
 
-    role_id: str | None = None
+    role_key: str | None = None
     team: str | None = None
 
-    alive: bool = True
-    joined: bool = True
+    status: PlayerStatus = PlayerStatus.ALIVE
 
-    voted_for: int | None = None
+    joined_at: float = 0.0
+    last_activity: float = 0.0
+
+    votes_received: int = 0
+    voted: bool = False
 
     night_action_used: bool = False
-    day_message_sent: bool = False
+    night_target: int | None = None
 
-    inactivity_count: int = 0
+    final_words: str | None = None
 
-    protection_used: bool = False
-    escape_used: bool = False
+    metadata: dict[str, Any] = field(default_factory=dict)
 
-    temporary_data: dict[str, Any] = field(
-        default_factory=dict
-    )
+    @property
+    def is_alive(self) -> bool:
+        return self.status == PlayerStatus.ALIVE
+
+    @property
+    def is_dead(self) -> bool:
+        return self.status == PlayerStatus.DEAD
+
+    @property
+    def has_left(self) -> bool:
+        return self.status == PlayerStatus.LEFT
+
+
+@dataclass
+class NightAction:
+    actor_id: int
+    action_type: str
+    target_id: int | None = None
+
+    priority: int = 0
+    created_at: float = 0.0
+
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class GameEvent:
+    event_type: str
+    message: str = ""
+
+    player_id: int | None = None
+    target_id: int | None = None
+
+    data: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
+class VoteRecord:
+    voter_id: int
+    target_id: int | None
+
+    created_at: float = 0.0
 
 
 @dataclass
@@ -46,194 +93,306 @@ class GameState:
 
     phase: GamePhase = GamePhase.LOBBY
 
-    players: dict[int, PlayerState] = field(
-        default_factory=dict
-    )
+    players: dict[int, PlayerState] = field(default_factory=dict)
 
-    phase_started_at: float | None = None
-    phase_ends_at: float | None = None
+    votes: dict[int, VoteRecord] = field(default_factory=dict)
 
-    countdown_started: bool = False
-    finished: bool = False
+    night_actions: list[NightAction] = field(default_factory=list)
 
-    votes: dict[int, int] = field(
-        default_factory=dict
-    )
+    events: list[GameEvent] = field(default_factory=list)
 
-    night_actions: dict[int, dict[str, Any]] = field(
-        default_factory=dict
-    )
+    day_number: int = 0
+    night_number: int = 0
 
-    events: list[dict[str, Any]] = field(
-        default_factory=list
-    )
+    phase_started_at: float = 0.0
+    phase_ends_at: float = 0.0
 
     winner_team: str | None = None
 
-    metadata: dict[str, Any] = field(
-        default_factory=dict
-    )
+    game_started: bool = False
+
+    settings: dict[str, Any] = field(default_factory=dict)
 
     def add_player(
         self,
         user_id: int,
+        name: str,
         username: str | None = None,
-        first_name: str = "",
-    ) -> bool:
-        if self.finished:
-            return False
-
+        joined_at: float = 0.0,
+    ) -> PlayerState:
         if user_id in self.players:
-            player = self.players[user_id]
+            return self.players[user_id]
 
-            if username is not None:
-                player.username = username
-
-            if first_name:
-                player.first_name = first_name
-
-            player.joined = True
-            return False
-
-        self.players[user_id] = PlayerState(
+        player = PlayerState(
             user_id=user_id,
+            name=name,
             username=username,
-            first_name=first_name,
+            joined_at=joined_at,
+            last_activity=joined_at,
         )
 
-        return True
+        self.players[user_id] = player
+        return player
 
     def remove_player(self, user_id: int) -> bool:
-        if user_id not in self.players:
+        player = self.players.get(user_id)
+
+        if player is None:
             return False
 
-        del self.players[user_id]
-        self.votes.pop(user_id, None)
-        self.night_actions.pop(user_id, None)
+        if player.status != PlayerStatus.ALIVE:
+            return False
 
+        player.status = PlayerStatus.LEFT
         return True
 
-    def get_player(
-        self,
-        user_id: int,
-    ) -> PlayerState | None:
+    def get_player(self, user_id: int) -> PlayerState | None:
         return self.players.get(user_id)
 
     def alive_players(self) -> list[PlayerState]:
         return [
             player
             for player in self.players.values()
-            if player.alive and player.joined
+            if player.is_alive
         ]
 
     def dead_players(self) -> list[PlayerState]:
         return [
             player
             for player in self.players.values()
-            if not player.alive
+            if player.is_dead
         ]
 
-    def joined_players(self) -> list[PlayerState]:
+    def left_players(self) -> list[PlayerState]:
         return [
             player
             for player in self.players.values()
-            if player.joined
+            if player.has_left
         ]
-
-    def player_count(self) -> int:
-        return len(self.joined_players())
 
     def alive_count(self) -> int:
         return len(self.alive_players())
 
-    def kill_player(
+    def mark_dead(
         self,
         user_id: int,
+        final_words: str | None = None,
     ) -> bool:
-        player = self.get_player(user_id)
+        player = self.players.get(user_id)
 
-        if player is None or not player.alive:
+        if player is None or not player.is_alive:
             return False
 
-        player.alive = False
-        player.voted_for = None
-
-        return True
-
-    def revive_player(
-        self,
-        user_id: int,
-    ) -> bool:
-        player = self.get_player(user_id)
-
-        if player is None or player.alive:
-            return False
-
-        player.alive = True
+        player.status = PlayerStatus.DEAD
+        player.final_words = final_words
 
         return True
 
     def set_role(
         self,
         user_id: int,
-        role_id: str,
+        role_key: str,
         team: str,
     ) -> bool:
-        player = self.get_player(user_id)
+        player = self.players.get(user_id)
 
         if player is None:
             return False
 
-        player.role_id = role_id
+        player.role_key = role_key
         player.team = team
 
         return True
 
-    def reset_votes(self) -> None:
+    def get_team_players(
+        self,
+        team: str,
+        alive_only: bool = False,
+    ) -> list[PlayerState]:
+        result = [
+            player
+            for player in self.players.values()
+            if player.team == team
+        ]
+
+        if alive_only:
+            result = [
+                player
+                for player in result
+                if player.is_alive
+            ]
+
+        return result
+
+    def get_teammates(
+        self,
+        user_id: int,
+        alive_only: bool = True,
+    ) -> list[PlayerState]:
+        player = self.players.get(user_id)
+
+        if player is None or player.team is None:
+            return []
+
+        teammates = self.get_team_players(
+            player.team,
+            alive_only=alive_only,
+        )
+
+        return [
+            teammate
+            for teammate in teammates
+            if teammate.user_id != user_id
+        ]
+
+    def add_night_action(
+        self,
+        actor_id: int,
+        action_type: str,
+        target_id: int | None = None,
+        priority: int = 0,
+        created_at: float = 0.0,
+        data: dict[str, Any] | None = None,
+    ) -> NightAction:
+        action = NightAction(
+            actor_id=actor_id,
+            action_type=action_type,
+            target_id=target_id,
+            priority=priority,
+            created_at=created_at,
+            data=data or {},
+        )
+
+        self.night_actions.append(action)
+
+        player = self.players.get(actor_id)
+
+        if player is not None:
+            player.night_action_used = True
+            player.night_target = target_id
+
+        return action
+
+    def get_actions_for_actor(
+        self,
+        actor_id: int,
+    ) -> list[NightAction]:
+        return [
+            action
+            for action in self.night_actions
+            if action.actor_id == actor_id
+        ]
+
+    def get_actions_for_target(
+        self,
+        target_id: int,
+    ) -> list[NightAction]:
+        return [
+            action
+            for action in self.night_actions
+            if action.target_id == target_id
+        ]
+
+    def clear_night_actions(self) -> None:
+        self.night_actions.clear()
+
+        for player in self.players.values():
+            player.night_action_used = False
+            player.night_target = None
+
+    def add_event(
+        self,
+        event_type: str,
+        message: str = "",
+        player_id: int | None = None,
+        target_id: int | None = None,
+        data: dict[str, Any] | None = None,
+    ) -> GameEvent:
+        event = GameEvent(
+            event_type=event_type,
+            message=message,
+            player_id=player_id,
+            target_id=target_id,
+            data=data or {},
+        )
+
+        self.events.append(event)
+        return event
+
+    def clear_events(self) -> None:
+        self.events.clear()
+
+    def register_vote(
+        self,
+        voter_id: int,
+        target_id: int | None,
+        created_at: float = 0.0,
+    ) -> VoteRecord | None:
+        voter = self.players.get(voter_id)
+
+        if voter is None or not voter.is_alive:
+            return None
+
+        if self.phase != GamePhase.VOTING:
+            return None
+
+        old_vote = self.votes.get(voter_id)
+
+        if old_vote is not None:
+            old_target = old_vote.target_id
+
+            if old_target is not None:
+                old_player = self.players.get(old_target)
+
+                if old_player is not None:
+                    old_player.votes_received = max(
+                        0,
+                        old_player.votes_received - 1,
+                    )
+
+        if target_id is not None:
+            target = self.players.get(target_id)
+
+            if target is None or not target.is_alive:
+                return None
+
+        vote = VoteRecord(
+            voter_id=voter_id,
+            target_id=target_id,
+            created_at=created_at,
+        )
+
+        self.votes[voter_id] = vote
+        voter.voted = True
+
+        if target_id is not None:
+            target = self.players[target_id]
+            target.votes_received += 1
+
+        return vote
+
+    def clear_votes(self) -> None:
         self.votes.clear()
 
         for player in self.players.values():
-            player.voted_for = None
+            player.votes_received = 0
+            player.voted = False
 
-    def add_vote(
-        self,
-        voter_id: int,
-        target_id: int,
-    ) -> bool:
-        if self.phase != GamePhase.VOTING:
-            return False
-
-        voter = self.get_player(voter_id)
-        target = self.get_player(target_id)
-
-        if voter is None or target is None:
-            return False
-
-        if not voter.alive or not target.alive:
-            return False
-
-        self.votes[voter_id] = target_id
-        voter.voted_for = target_id
-
-        return True
-
-    def vote_counts(self) -> dict[int, int]:
+    def vote_count(self) -> dict[int, int]:
         counts: dict[int, int] = {}
 
-        for target_id in self.votes.values():
-            target = self.get_player(target_id)
-
-            if target is None or not target.alive:
+        for vote in self.votes.values():
+            if vote.target_id is None:
                 continue
 
-            counts[target_id] = (
-                counts.get(target_id, 0) + 1
+            counts[vote.target_id] = (
+                counts.get(vote.target_id, 0) + 1
             )
 
         return counts
 
-    def most_voted_player(self) -> int | None:
-        counts = self.vote_counts()
+    def voting_result(self) -> int | None:
+        counts = self.vote_count()
 
         if not counts:
             return None
@@ -241,8 +400,8 @@ class GameState:
         highest = max(counts.values())
 
         winners = [
-            user_id
-            for user_id, count in counts.items()
+            player_id
+            for player_id, count in counts.items()
             if count == highest
         ]
 
@@ -251,116 +410,112 @@ class GameState:
 
         return winners[0]
 
-    def set_phase(
+    def all_alive_have_voted(self) -> bool:
+        alive = self.alive_players()
+
+        if not alive:
+            return False
+
+        return all(
+            player.user_id in self.votes
+            for player in alive
+        )
+
+    def start_game(self, started_at: float = 0.0) -> None:
+        self.phase = GamePhase.NIGHT
+        self.game_started = True
+        self.night_number = 1
+        self.day_number = 0
+        self.phase_started_at = started_at
+
+        self.clear_votes()
+        self.clear_night_actions()
+        self.clear_events()
+
+    def start_night(
         self,
-        phase: GamePhase,
-        started_at: float | None = None,
-        ends_at: float | None = None,
+        started_at: float = 0.0,
+        ends_at: float = 0.0,
     ) -> None:
-        self.phase = phase
+        self.phase = GamePhase.NIGHT
+        self.night_number += 1
         self.phase_started_at = started_at
         self.phase_ends_at = ends_at
 
-        if phase != GamePhase.VOTING:
-            self.reset_votes()
+        self.clear_votes()
+        self.clear_night_actions()
+        self.clear_events()
 
-        if phase != GamePhase.NIGHT:
-            self.night_actions.clear()
-
-    def set_night_action(
+    def start_day(
         self,
-        user_id: int,
-        action: dict[str, Any],
-    ) -> bool:
-        if self.phase != GamePhase.NIGHT:
-            return False
-
-        player = self.get_player(user_id)
-
-        if player is None or not player.alive:
-            return False
-
-        self.night_actions[user_id] = action
-        player.night_action_used = True
-
-        return True
-
-    def get_night_action(
-        self,
-        user_id: int,
-    ) -> dict[str, Any] | None:
-        return self.night_actions.get(user_id)
-
-    def add_event(
-        self,
-        event_type: str,
-        **data: Any,
+        started_at: float = 0.0,
+        ends_at: float = 0.0,
     ) -> None:
-        self.events.append(
-            {
-                "type": event_type,
-                **data,
-            }
-        )
+        self.phase = GamePhase.DAY
+        self.day_number += 1
+        self.phase_started_at = started_at
+        self.phase_ends_at = ends_at
 
-    def clear_events(self) -> None:
-        self.events.clear()
+        self.clear_votes()
 
-    def reset_night_actions(self) -> None:
-        self.night_actions.clear()
-
-        for player in self.players.values():
-            player.night_action_used = False
-
-    def reset_day_actions(self) -> None:
-        for player in self.players.values():
-            player.day_message_sent = False
-
-    def mark_inactive(
+    def start_voting(
         self,
-        user_id: int,
-    ) -> bool:
-        player = self.get_player(user_id)
-
-        if player is None:
-            return False
-
-        player.inactivity_count += 1
-
-        return True
-
-    def reset_inactivity(
-        self,
-        user_id: int,
-    ) -> bool:
-        player = self.get_player(user_id)
-
-        if player is None:
-            return False
-
-        player.inactivity_count = 0
-
-        return True
-
-    def set_winner(
-        self,
-        team: str,
+        started_at: float = 0.0,
+        ends_at: float = 0.0,
     ) -> None:
-        self.winner_team = team
-        self.finished = True
+        self.phase = GamePhase.VOTING
+        self.phase_started_at = started_at
+        self.phase_ends_at = ends_at
+
+        self.clear_votes()
+
+    def end_game(self, winner_team: str | None = None) -> None:
         self.phase = GamePhase.ENDED
+        self.winner_team = winner_team
+        self.game_started = False
 
-    def reset_for_new_game(self) -> None:
+    def reset(self) -> None:
         self.phase = GamePhase.LOBBY
-        self.phase_started_at = None
-        self.phase_ends_at = None
 
         self.players.clear()
         self.votes.clear()
         self.night_actions.clear()
         self.events.clear()
 
+        self.day_number = 0
+        self.night_number = 0
+
+        self.phase_started_at = 0.0
+        self.phase_ends_at = 0.0
+
         self.winner_team = None
-        self.finished = False
-        self.countdown_started = False
-        self.metadata.clear()
+        self.game_started = False
+
+    def player_names(
+        self,
+        alive_only: bool = False,
+    ) -> list[str]:
+        players = (
+            self.alive_players()
+            if alive_only
+            else list(self.players.values())
+        )
+
+        return [
+            player.name
+            for player in players
+        ]
+
+    def summary(self) -> dict[str, Any]:
+        return {
+            "chat_id": self.chat_id,
+            "phase": self.phase.value,
+            "players": len(self.players),
+            "alive": self.alive_count(),
+            "dead": len(self.dead_players()),
+            "left": len(self.left_players()),
+            "day": self.day_number,
+            "night": self.night_number,
+            "winner": self.winner_team,
+            "started": self.game_started,
+        }
